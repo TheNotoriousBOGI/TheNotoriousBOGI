@@ -2974,7 +2974,7 @@ void loop()
                     HTTPClient http;
                     //   http.begin("https://zuse.icas.fh-dortmund.de:2443/ict-gw/sml");
                     //   http.addHeader("x-api-key","lz7L445xjHLvBUvr5zmwJf4tmRTeIQCX");
-                    //   http.addHeader("Authorization","Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJrTEsxVDYyTXJId1UwMXMxOWtYeVNzVkI4eFpzNkdnNCJ9.MKNoOz79a8oms-7mIb3kU2j6NdrjaDzh4lzqX6z9zCQ");
+                    //   http.addHeader("Authorization","Bearer ");
                     //   http.addHeader("x-host-override","sdc-service-api");
                     //   http.addHeader("Content-Type", "application/json");
                     http.begin(Serveraddress);
