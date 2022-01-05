@@ -2973,7 +2973,7 @@ void loop()
                 {
                     HTTPClient http;
                     //   http.begin("https://zuse.icas.fh-dortmund.de:2443/ict-gw/sml");
-                    //   http.addHeader("x-api-key","lz7L445xjHLvBUvr5zmwJf4tmRTeIQCX");
+                    //   http.addHeader("x-api-key","");
                     //   http.addHeader("Authorization","Bearer ");
                     //   http.addHeader("x-host-override","sdc-service-api");
                     //   http.addHeader("Content-Type", "application/json");
