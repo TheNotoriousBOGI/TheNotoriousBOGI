@@ -2,15 +2,25 @@
 // ###                                                                ###
 // ###   Auswertesoftware fuer HAGER EHZ363... und EHZ163...          ###
 // ###                                                                ###
-// ###   Firmware-Version: 20210903                                   ###
+// ###   Firmware-Version: 20211129                                   ###
 // ###                                                                ###
 // ###                                                                ###
 // ######################################################################
 
+//issues to resolve in this version:
+//--write log to internal memory and make available on page
+//--test sd-card
+//--save values to sd card
+//--write sending-statistka to log on internal memory
+//--write package to backlog-file if sending fails
+//--send backlog if server is available again
+//--
+//--
+
+
 
 //custom headers (include-folder)
 #include "obis.h"
-
 #include "FS.h"
 #include "SD.h"
 #include "SPI.h"
@@ -22,14 +32,23 @@
 #include <HTTPClient.h>
 #include <time.h>
 
+
+//device indentifiers
+char device_ID[MSIZE] = "SUITE_002";
+char firmwareVersion[MSIZE] = "2021-11-29";
+
+
 //webserver for ota-update
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncElegantOTA.h>;
 AsyncWebServer server(80);
 
+
 //webportal
 String Serveraddress = "";
+String Serveraddress_SML = "/sml";
+String Serveraddress_META = "/metadata";
 String Apikey = "";
 String Authorization = "";
 String Bearer = "Bearer ";
@@ -37,11 +56,14 @@ bool checkbox_server = true;
 bool checkbox_apikey = false;
 bool checkbox_authorization = false;
 
+
 //WiFi info
 //const char *ntpServer = "pool.ntp.org";
-const char *ntpServer = "ptbtime1.ptb.de";  //changed for compatibility
+const char *ntpServer = "ptbtime1.ptb.de";  //changed for compatibility, pool.ntp.org takes too much time sometimes
+
 
 //timestamp function
+unsigned long initial_timestamp;
 unsigned long timestamp;
 unsigned long getTimestamp()
 {
@@ -56,12 +78,14 @@ unsigned long getTimestamp()
 }
 
 
-
-//Variables
+//general device (ehz) information
 char ServerID_string[MSIZE];
 char ServerID_string_formatted[MSIZE];
 char eHZ_Message[MSIZE] = "";    // Zeichenpuffer der gelesenen Daten vom eHZ
 char manufacturer[MSIZE] = "hager";
+
+
+//sml analysis helpers
 char printstring[MSIZE];         // String als Zwischenspeicher fuer die Ausgabe auf der Konsole
 char Daten_Substring[MSIZE];     // Substring fuer Seriennummer
 char eHZ_zeichen[4];             // Zeichen - als HEX gewandelt, ohne Trennzeichen - vom eHZ ueber die optische RS232
@@ -73,14 +97,33 @@ long int PrintZaehlvariable = 0; // Zaehlvariable fuer die Durchnummerierung der
 int Werte_Empfangen = 0;         // Flag, wird gesetzt, wenn wenigstens 1 Datensatz empfangen wurde ---> Ausgabe
 int TL_Flag;                     // T/L Kenner des SML Protokolls
 int TL_Offset;                   // Hilfsvariable um die Daten auszuwerten ja nach T/L Kenner
+long int Offset = 0;             // Offset des Suchstrings
+char *B_Daten;                   // Pointer auf Datenbeginn des Auswerteteils
+char *Beginn;                    // Pointer auf Beginn der eHZ-Sendedaten
 
+
+//sml metadata
+long int inputSML = 0;
+long int sendAttempts = 0;
+long int sendAttemptsSuccessful = 0;
+long int sendAttemptsFailed = 0;
+long int backlog = 0;
+
+
+//device metadata
+long int upTime = 0;
+long int freeSpaceSD = 0;
+long int ramMaxLoad = 0;
+long int signalStrengthWifi = 0;
+
+
+//measured variables and helpers
 unsigned long int Zaehlernummer = 0; // Ausgelesene Werte aus dem Telegramm (Zaehlernummer)
 long int Age_Zaehlernummer = 0;      // "Alter" der Daten
 double Wirkleistung = 0;             // Ausgelesene Werte aus dem Telegramm (Wirkleistung)
 long int Age_Wirkleistung = 0;       // "Alter" der Daten
 double Wirkenergie = 0;              // Ausgelesene Werte aus dem Telegramm (Wirkenergie)
 long int Age_Wirkenergie = 0;        // "Alter" der Daten
-//NEU
 double WirkenergieT1 = 0;
 long int Age_WirkenergieT1 = 0;
 double WirkenergieT2 = 0;
@@ -101,7 +144,6 @@ double PhasenabweichungSpannungen_L1L2 = 0;
 long int Age_PhasenabweichungSpannungen_L1L2 = 0;
 double PhasenabweichungSpannungen_L1L3 = 0;
 long int Age_PhasenabweichungSpannungen_L1L3 = 0;
-//
 double Wirkleistung_L1 = 0;       // Ausgelesene Werte aus dem Telegramm (Wirkleistung L1)
 long int Age_Wirkleistung_L1 = 0; // "Alter" der Daten
 double Wirkleistung_L2 = 0;       // Ausgelesene Werte aus dem Telegramm (Wirkleistung L2)
@@ -133,38 +175,203 @@ long int Age_Chiptemp_Max = 0;
 double Chiptemp_Avg = 0;
 long int Age_Chiptemp_Avg = 0;
 
+
+//iteration counter
 int i = 0;           // Zaehlvariable fuer Schleifen
-long int Offset = 0; // Offset des Suchstrings
-char *B_Daten;       // Pointer auf Datenbeginn des Auswerteteils
-char *Beginn;        // Pointer auf Beginn der eHZ-Sendedaten
 
 
+//counter to control WiFi-connectivity
 int connection_counter = 0;
 
-//#########################################################################################################################################
 
-//########################################################################################################################################
 //define pins for serial input and output
 #define RXD2 16
 #define TXD2 17
 
+
+//FileFunctions###########################################################################################################################
+//list directories
+void listDir(fs::FS &fs, const char * dirname, uint8_t levels)
+{
+  Serial.printf("Listing directory: %s\n", dirname);
+ 
+  File root = fs.open(dirname);
+  if (!root)
+     {
+       Serial.println("Failed to open directory");
+       return;
+     }
+  if (!root.isDirectory())
+     {
+       Serial.println("Not a directory");
+       return;
+     }
+ 
+  File file = root.openNextFile();
+  while(file)
+    {
+       if (file.isDirectory())
+          {
+            Serial.print(" DIR : ");
+            Serial.println(file.name());
+            if (levels)
+               {
+                 listDir(fs, file.name(), levels -1);
+               }
+          }
+         else 
+          {
+            Serial.print(" FILE: ");
+            Serial.print(file.name());
+            Serial.print(" SIZE: ");
+            Serial.println(file.size());
+          }
+       file = root.openNextFile();
+   }
+}
+
+//create directory
+void createDir(fs::FS &fs, const char * path)
+{
+  Serial.printf("Creating Dir: %s\n", path);
+  if (fs.mkdir(path))
+     {
+       Serial.println("Dir created");
+     } 
+    else
+     {
+       Serial.println("mkdir failed");
+     }
+}
+
+//remove directory
+void removeDir(fs::FS &fs, const char * path)
+{
+  Serial.printf("Removing Dir: %s\n", path);
+  if (fs.rmdir(path))
+     {
+       Serial.println("Dir removed");
+     }
+    else
+     {
+       Serial.println("rmdir failed");
+     }
+}
+
+//read file
+void readFile(fs::FS &fs, const char * path)
+{
+  Serial.printf("Reading file: %s\n", path);
+ 
+  File file = fs.open(path);
+  if (!file)
+     {
+       Serial.println("Failed to open file for reading");
+       return;
+     }
+ 
+  Serial.print("Read from file: ");
+  while (file.available())
+    {
+      Serial.write(file.read());
+    }
+}
+
+//write file
+void writeFile(fs::FS &fs, const char * path, const char * message)
+{
+  Serial.printf("Writing file: %s\n", path);
+ 
+  File file = fs.open(path, FILE_WRITE);
+  if (!file)
+     {
+       Serial.println("Failed to open file for writing");
+       return;
+     }
+  if (file.print(message))
+     {
+       Serial.println("File written");
+     }
+    else
+     {
+       Serial.println("Write failed");
+     }
+}
+
+//append to file
+void appendFile(fs::FS &fs, const char * path, const char * message)
+{
+  //Serial.printf("Appending to file: %s\n", path);
+ 
+  File file = fs.open(path, FILE_APPEND);
+  if (!file)
+     {
+       //Serial.println("Failed to open file for appending");
+      return;
+     }
+  if (file.print(message))
+     {
+       //Serial.println("Message appended");
+     } 
+    else 
+     {
+       Serial.println("Append failed");
+     }
+}
+
+//rename file
+void renameFile(fs::FS &fs, const char * path1, const char * path2)
+{
+  Serial.printf("Renaming file %s to %s\n", path1, path2);
+  if (fs.rename(path1, path2)) 
+     {
+       Serial.println("File renamed");
+     } 
+    else
+     {
+       Serial.println("Rename failed");
+     }
+}
+
+//delete file
+void deleteFile(fs::FS &fs, const char * path)
+{
+  Serial.printf("Deleting file: %s\n", path);
+  if (fs.remove(path))
+     {
+       Serial.println("File deleted");
+     } 
+    else 
+     {
+       Serial.println("Delete failed");
+     }
+}
+
+
+
+
 //SETUP(START)############################################################################################################################
+//########################################################################################################################################
 void setup()
 {
+    //start SPIFFS
     SPIFFS.begin(true);
+
     //open serial connection (console output)
     Serial.begin(115200);
 
     //Open optical serial connection
     Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
 
-    //Print optical interface info
+    //print optical interface info
     Serial.println("Serielle Schnittstelle 2 (eHZ):");
     Serial.println("Serial Txd is on pin: " + String(TXD2));
     Serial.println("Serial Rxd is on pin: " + String(RXD2));
     Serial.println(" ");
 
-    WiFiSettings.heading("Device SUITE_001");
+    //display device info on config page
+    WiFiSettings.heading(device_ID);
+    WiFiSettings.heading(firmwareVersion);
 
     // Define custom settings saved by WifiSettings
     // These will return the default if nothing was set before
@@ -175,8 +382,9 @@ void setup()
     String Authorization_dummy = WiFiSettings.string("Authorization Bearer", "Ndufqa9d3qh8d320fh4379fh438904hf8430f9h4herf947fgPUEFF");
     bool checkbox_authorization_dummy = WiFiSettings.checkbox("Bearer");
 
-
+    //reset connection counter
     connection_counter = 0;
+
     // Connect to WiFi with a timeout of 30 seconds
     // Launches the portal if the connection failed
     WiFiSettings.connect(true, 30);
@@ -192,17 +400,53 @@ void setup()
     //get time
     configTime(0, 0, ntpServer);
 
+    //start update-functionality
     AsyncElegantOTA.begin(&server);
     server.begin();
     Serial.println("HTTP server started");
+
+    //set initial timestamp for calculation of uptime
+    initial_timestamp = getTimestamp();
+
+    //start SD card
+    if(!SD.begin()){
+        Serial.println("Card Mount Failed");
+        return;
+    }
+
+    uint8_t cardType = SD.cardType();
+
+    Serial.print("SD Card Type: ");
+    if(cardType == CARD_NONE){
+        Serial.println("No SD card attached");
+        return;
+    } else if(cardType == CARD_MMC){
+        Serial.println("MMC");
+    } else if(cardType == CARD_SD){
+        Serial.println("SDSC");
+    } else if(cardType == CARD_SDHC){
+        Serial.println("SDHC");
+    } else {
+        Serial.println("UNKNOWN");
+    }
+    uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+    Serial.printf("SD Card Size: %lluMB\n", cardSize);
 }
 
 
 //MAIN######################################################################################################################################################################
-
 void loop()
 {
 
+createDir(SD, "/logs");
+writeFile(SD, "/logs/LOG.txt", "LOG-File erstellt\n");
+appendFile(SD, "/logs/LOG.txt", "LOGFile:\n");
+appendFile(SD, "/logs/LOG.txt", "1. \n");
+appendFile(SD, "/logs/LOG.txt", "2. \n");
+appendFile(SD, "/logs/LOG.txt", "3. \r\n");
+
+appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
+    //run update server
     AsyncElegantOTA.loop();
 
     if (Serial2.available())
@@ -2966,9 +3210,10 @@ void loop()
 
             if (Werte_Empfangen == 1)
             {
-
+                inputSML++;
                 timestamp = getTimestamp();
 
+                //Werte an Server senden
                 if (timestamp != 0)
                 {
                     HTTPClient http;
@@ -2977,7 +3222,7 @@ void loop()
                     //   http.addHeader("Authorization","Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJrTEsxVDYyTXJId1UwMXMxOWtYeVNzVkI4eFpzNkdnNCJ9.MKNoOz79a8oms-7mIb3kU2j6NdrjaDzh4lzqX6z9zCQ");
                     //   http.addHeader("x-host-override","sdc-service-api");
                     //   http.addHeader("Content-Type", "application/json");
-                    http.begin(Serveraddress);
+                    http.begin(Serveraddress+Serveraddress_SML);
                     if (checkbox_apikey)
                     {
                         http.addHeader("x-api-key", Apikey);
@@ -2993,8 +3238,24 @@ void loop()
                     String httpRequestData = "{\"serverID\": \"" + String(ServerID_string_formatted) + "\",\"timestamp\":" + String(timestamp) + "000,\"channel\": [{\"obis\": \"0100010800ff\",\"description\": \"Wirkenergie Bezug Gesamt\",\"value\":" + String(Wirkenergie) + " ,\"unit\": \"WATT_HOUR\"},{\"obis\": \"0100010801ff\",\"description\": \"Wirkenergie Bezug Tarif 1\",\"value\": " + String(WirkenergieT1) + " ,\"unit\": \"WATT_HOUR\"},{\"obis\": \"0100010802ff\",\"description\": \"Wirkenergie Bezug Tarif 2\",\"value\": " + String(WirkenergieT2) + " ,\"unit\": \"WATT_HOUR\"},{\"obis\": \"0100100700ff\",\"description\": \"Momentanleistung Gesamt\",\"value\": " + String(Wirkleistung) + " ,\"unit\": \"WATT\"},{\"obis\": \"0100240700ff\",\"description\": \"Wirkleistung L1\",\"value\": " + String(Wirkleistung_L1) + " ,\"unit\": \"WATT\"},{\"obis\": \"0100170700ff\",\"description\": \"Blindleistung L1\",\"value\": " + String(Blindleistung_L1) + " ,\"unit\": \"VAR\"},{\"obis\": \"01001f0700ff\",\"description\": \"Strom L1\",\"value\": " + String(Strom_L1) + " ,\"unit\": \"AMPERE\"},{\"obis\": \"0100200700ff\",\"description\": \"Spannung L1\",\"value\":" + String(Spannung_L1) + " ,\"unit\": \"VOLT\"},{\"obis\": \"0100510704ff\",\"description\": \"Phasenanweichung Strom/Spannung L1\",\"value\": " + String(PhasenabweichungStromSpannung_L1) + " ,\"unit\": \"DEGREE\"},{\"obis\": \"0100380700ff\",\"description\": \"Wirkleistung L2\",\"value\": " + String(Wirkleistung_L2) + " ,\"unit\": \"WATT\"},{\"obis\": \"01002b0700ff\",\"description\": \"Blindleistung L2\",\"value\": " + String(Blindleistung_L2) + " ,\"unit\": \"VAR\"},{\"obis\": \"0100330700ff\",\"description\": \"Strom L2\",\"value\": " + String(Strom_L2) + " ,\"unit\": \"AMPERE\"},{\"obis\": \"0100340700ff\",\"description\": \"Spannung L2\",\"value\":" + String(Spannung_L2) + " ,\"unit\": \"VOLT\"},{\"obis\": \"010051070fff\",\"description\": \"Phasenanweichung Strom/Spannung L2\",\"value\": " + String(PhasenabweichungStromSpannung_L2) + " ,\"unit\": \"DEGREE\"},{\"obis\": \"01004c0700ff\",\"description\": \"Wirkleistung L3\",\"value\": " + String(Wirkleistung_L3) + " ,\"unit\": \"WATT\"},{\"obis\": \"01003f0700ff\",\"description\": \"Blindleistung L3\",\"value\": " + String(Blindleistung_L3) + " ,\"unit\": \"VAR\"},{\"obis\": \"0100470700ff\",\"description\": \"Strom L3\",\"value\": " + String(Strom_L3) + " ,\"unit\": \"AMPERE\"},{\"obis\": \"0100480700ff\",\"description\": \"Spannung L3\",\"value\":" + String(Spannung_L3) + " ,\"unit\": \"VOLT\"},{\"obis\": \"010051071aff\",\"description\": \"Phasenanweichung Strom/Spannung L3\",\"value\": " + String(PhasenabweichungStromSpannung_L3) + " ,\"unit\": \"DEGREE\"},{\"obis\": \"0100510701ff\",\"description\": \"Phasenanweichung Spannungen L1/L2\",\"value\": " + String(PhasenabweichungSpannungen_L1L2) + " ,\"unit\": \"DEGREE\"},{\"obis\": \"0100510702ff\",\"description\": \"Phasenanweichung Spannungen L1/L3\",\"value\": " + String(PhasenabweichungSpannungen_L1L3) + " ,\"unit\": \"DEGREE\"},{\"obis\": \"010060320303\",\"description\": \"Spannungsminimum\",\"value\": " + String(Spannung_Min) + " ,\"unit\": \"VOLT\"},{\"obis\": \"010060320304\",\"description\": \"Spannungsmaximum\",\"value\": " + String(Spannung_Max) + " ,\"unit\": \"VOLT\"}],\"manufacturer\": \"" + String(manufacturer) + "\",\"smlPayload\": \"" + String(eHZ_Message) + "\"}";
 
 //AUSGABE
+                    Serial.println("-----------------------------------------------");
+                    Serial.println("-----------------------------------------------");
+                    Serial.println("-----------------------------------------------");
+                    Serial.println("-----------------------------------------------");
+                    Serial.println("-----------------------------------------------");
+                    Serial.println("SML Message:");
                     Serial.println(httpRequestData);
-                    int httpResponseCode = http.POST(httpRequestData);
+                    int httpResponseCode = http.PUT(httpRequestData);
+                    sendAttempts++;
+
+                    if(httpResponseCode == 200){
+                        sendAttemptsSuccessful++;
+                    } else if(httpResponseCode == 201){
+                        sendAttemptsSuccessful++;
+                    } else{
+                        sendAttemptsFailed++;
+                        backlog++;
+                    }
 
 //AUSGABE
                     Serial.print("HTTP Response code: ");
@@ -3002,6 +3263,129 @@ void loop()
 
                     http.end();
                 }
+
+
+                //Metadaten an Server senden
+                if (timestamp != 0)
+                {
+                    HTTPClient http;
+                    // http.begin("https://zuse.icas.fh-dortmund.de:2443/ict-gw/metadata");
+                    // http.addHeader("x-api-key","lz7L445xjHLvBUvr5zmwJf4tmRTeIQCX");
+                    // http.addHeader("Authorization","Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJrTEsxVDYyTXJId1UwMXMxOWtYeVNzVkI4eFpzNkdnNCJ9.MKNoOz79a8oms-7mIb3kU2j6NdrjaDzh4lzqX6z9zCQ");
+                    // http.addHeader("x-host-override","sdc-service-api");
+                    // http.addHeader("Content-Type", "application/json");
+                    
+                    http.begin(Serveraddress+Serveraddress_META);
+                    if (checkbox_apikey)
+                    {
+                        http.addHeader("x-api-key", Apikey);
+                    }
+                    if (checkbox_authorization)
+                    {
+                        http.addHeader("Authorization", Bearer);
+                    }
+
+                    http.addHeader("x-host-override", "sdc-service-api");
+                    http.addHeader("Content-Type", "application/json");
+
+
+                    upTime = (timestamp - initial_timestamp)*1000;
+                    String metadataMessage = "{\"serverID\": \"" + String(ServerID_string_formatted) + "\",\"timestamp\":" + String(timestamp) + "000,\"identification\":" + String(ServerID_string) + ",\"manufacturer\": \"" + String(manufacturer) +"\", \"metadata\": [{\"id\": \"identification\",\"description\": \"Individualkennung des Geräts\", \"value\":" + String(device_ID) + " , \"unit\": \"Undefined\"},{\"id\": \"upTime\",\"description\": \"wie lange läuft das Gerät\", \"value\": " + String(upTime) + " ,\"unit\": \"MILLISECOND\"},{\"id\": \"inputSML\",\"description\": \"Anzahl empfangener SML-Protokolle\",\"value\": " + String(inputSML) + " ,\"unit\": \"COUNT\"},{\"id\": \"sendAttempts\",\"description\": \"Anzahl Versuche Datensätze zu übertragen\",\"value\": " + String(sendAttempts) + " ,\"unit\": \"COUNT\"},{\"id\": \"sendAttemptsSuccessful\",\"description\": \"Anzahl erfolgreicher Übertragungsversuche\",\"value\": " + String(sendAttemptsSuccessful) + " ,\"unit\": \"COUNT\"},{\"id\": \"sendAttemptsFailed\",\"description\": \"Anzahl gescheiterter Übertragungsversuche\",\"value\": " + String(sendAttemptsFailed) + " ,\"unit\": \"COUNT\"},{\"id\": \"backlog\",\"description\": \"Anzahl noch zu übertragender Datensätze\",\"value\": " + String(backlog) + " ,\"unit\": \"COUNT\"},{\"id\": \"firmwareVersion\",\"description\": \"Aktuell installierte Firmware\",\"value\":" + String(firmwareVersion) + " ,\"unit\": \"Undefined\"},{\"id\": \"freeSpaceSD\",\"description\": \"Speicherplatz auf der SD-Karte\",\"value\": " + String(freeSpaceSD) + " ,\"unit\": \"COUNT\"},{\"id\": \"ramMaxLoad\",\"description\": \"maximale Arbeitsspeicherauslastung\",\"value\": " + String(ramMaxLoad) + " ,\"unit\": \"COUNT\"},{\"id\": \"signalStrengthWifi\",\"description\": \"aktuelle Signalstärke des WiFi-Netzes\",\"value\": " + String(signalStrengthWifi) + " ,\"unit\": \"PERCENTAGE\"}]}";
+
+                    // String metadataMessage = 
+                    // "{
+                    //     \"serverID\": \"" + String(ServerID_string_formatted) + "\",
+                    //     \"timestamp\":" + String(timestamp) + "000,
+                    //     \"identification\":" + String(ServerID_string) + "\",
+                    //     \"manufacturer\":" + String(manufacturer) +"\",
+                    //     \"metadata\": [
+                    //         {
+                    //             \"id\": \"identification\",
+                    //             \"description\": \"Individualkennung des Geräts\",
+                    //             \"value\":" + String(device_ID) + " ,
+                    //             \"unit\": \"Undefined\"
+                    //         },
+                    //         {
+                    //             \"id\": \"upTime\",
+                    //             \"description\": \"wie lange läuft das Gerät\",
+                    //             \"value\": " + String(upTime) + " ,
+                    //             \"unit\": \"MILLISECOND\"
+                    //         },
+                    //         {
+                    //             \"id\": \"inputSML\",
+                    //             \"description\": \"Anzahl empfangener SML-Protokolle\",
+                    //             \"value\": " + String(inputSML) + " ,
+                    //             \"unit\": \"COUNT\"
+                    //         },
+                    //         {
+                    //             \"id\": \"sendAttempts\",
+                    //             \"description\": \"Anzahl Versuche Datensätze zu übertragen\",
+                    //             \"value\": " + String(sendAttempts) + " ,
+                    //             \"unit\": \"COUNT\"
+                    //         },
+                    //         {
+                    //             \"id\": \"sendAttemptsSuccessful\",
+                    //             \"description\": \"Anzahl erfolgreicher Übertragungsversuche\",
+                    //             \"value\": " + String(sendAttemptsSuccessful) + " ,
+                    //             \"unit\": \"COUNT\"
+                    //         },
+                    //         {
+                    //             \"id\": \"sendAttemptsFailed\",
+                    //             \"description\": \"Anzahl gescheiterter Übertragungsversuche\",
+                    //             \"value\": " + String(sendAttemptsFailed) + " ,
+                    //             \"unit\": \"COUNT\"
+                    //         },
+                    //         {
+                    //             \"id\": \"backlog\",
+                    //             \"description\": \"Anzahl noch zu übertragender Datensätze\",
+                    //             \"value\": " + String(backlog) + " ,
+                    //             \"unit\": \"COUNT\"
+                    //         },
+                    //         {
+                    //             \"id\": \"firmwareVersion\",
+                    //             \"description\": \"Aktuell installierte Firmware\",
+                    //             \"value\":" + String(firmwareVersion) + " ,
+                    //             \"unit\": \"Undefined\"
+                    //         },
+                    //         {
+                    //             \"id\": \"freeSpaceSD\",
+                    //             \"description\": \"Speicherplatz auf der SD-Karte\",
+                    //             \"value\": " + String(freeSpaceSD) + " ,
+                    //             \"unit\": \"COUNT\"
+                    //         },
+                    //         {
+                    //             \"id\": \"ramMaxLoad\",
+                    //             \"description\": \"maximale Arbeitsspeicherauslastung\",
+                    //             \"value\": " + String(ramMaxLoad) + " ,
+                    //             \"unit\": \"COUNT\"
+                    //         },
+                    //         {
+                    //             \"id\": \"signalStrengthWifi\",
+                    //             \"description\": \"aktuelle Signalstärke des WiFi-Netzes\",
+                    //             \"value\": " + String(signalStrengthWifi) + " ,
+                    //             \"unit\": \"PERCENTAGE\"
+                    //         }
+                    //     ],
+                    // }";
+
+//AUSGABE
+                    Serial.println("-----------------------------------------------");
+                    Serial.println("-----------------------------------------------");
+                    Serial.println("-----------------------------------------------");
+                    Serial.println("-----------------------------------------------");
+                    Serial.println("-----------------------------------------------");
+                    Serial.println("METADATA Message:");
+                    Serial.println(metadataMessage);
+                    int httpResponseCodeMeta = http.PUT(metadataMessage);
+
+//AUSGABE
+                    Serial.print("HTTP Response code: ");
+                    Serial.println(httpResponseCodeMeta);
+
+                    http.end();
+                }
+
+                //reset activation
                 Werte_Empfangen = 0;
             }
             else
