@@ -2972,7 +2972,7 @@ void loop()
                 if (timestamp != 0)
                 {
                     HTTPClient http;
-                    //   http.begin("https://zuse.icas.fh-dortmund.de:2443/ict-gw/sml");
+                    //   http.begin("");
                     //   http.addHeader("x-api-key","");
                     //   http.addHeader("Authorization","Bearer ");
                     //   http.addHeader("x-host-override","sdc-service-api");
