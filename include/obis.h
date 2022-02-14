@@ -1,8 +1,6 @@
 #ifndef OBIS
 #define OBIS
 
-//Synonyms
-//NEU: Hersteller ID
 #define OBIS_HERSTELLERID "Obiskennung 129-129.199.130.3*255"
 #define TEXT_HERSTELLERID "HerstellerID"
 #define KENN_HERSTELLERID "8181C78203FF"
@@ -183,21 +181,20 @@
 #define OFFSET_CHIPTEMPAVG 24 //26
 #define LENGHT_CHIPTEMPAVG 18 //4
 
-
 //Debug/Print
 //      Debug   MSGE       SNR    WL     WE     WL1    WL2    WL3    UL1    UL2    UL3     IL1     IL2     IL3     Umax     Umin     Tchip    //????
-#define DEBUG (0x800000 + 0x00 + 0x00 + 0x00 + 0x00 + 0x00 + 0x00 + 0x00 + 0x00 + 0x000 + 0x000 + 0x000 + 0x000 + 0x0000 + 0x0000 + 0x0000) //????
+//#define DEBUG (0x800000 + 0x00 + 0x00 + 0x00 + 0x00 + 0x00 + 0x00 + 0x00 + 0x00 + 0x000 + 0x000 + 0x000 + 0x000 + 0x0000 + 0x0000 + 0x0000) //????
 #define DRUCK (0x800000 + 0x01 + 0x02 + 0x04 + 0x08 + 0x10 + 0x20 + 0x40 + 0x80 + 0x100 + 0x200 + 0x400 + 0x800 + 0x1000 + 0x2000 + 0x4000) //????
 
 //Print Settings
-#define HORIZONTAL 1     /* Horizontaler Druck der Ergebnisse                                                                      */
-#define TRENNZEICHEN ';' /* Trennzeichen bei horizontalem Druck (wird zwischen Werten platziert, z.B. für CSV-Dateien)             */
-#define UEBERSCHRIFT 0   /* Wiederholung der Ueberschrift bei horiz. Druck nach UEB_ZEILE Zeilen, wenn 1, sonst nur 1x zu Beginn   */
-#define UEB_ZEILE 10     /* Wenn eingeschaltet, dann Anzahl der Zeilen, nachdem die Ueberschrift wiederholt wird                   */
-#define LOGGING 1        /* Wenn 1, werden die Daten in das File eHZ_Data2.txt geloggt, dafuer muss HORIZONTAL ausgewaehlt sein.    */
-#define MSIZE 4096       /* Maximallaenge fuer Zeichenketten      */
+#define HORIZONTAL 1     /* horizontal print of results                                             */
+#define TRENNZEICHEN ';' /* value separators for horizontal prints                                  */
+#define UEBERSCHRIFT 0   /* repeat headline if 1, print only once when 0                            */
+#define UEB_ZEILE 10     /* number of lines, after which headline gets repeated (if switched on)    */
+#define LOGGING 1        /* log files to txt                                                        */
+#define MSIZE 4096       /* maximal number of string                                                */
 
-// Hex Nibble in eine Zahl zwischen 0 und 15 umwandeln (long int)
+// convert HEX nibble to number between 0 and 15 (long int)
 int Chr_2_Number(char c)
 {
     int i = 0;

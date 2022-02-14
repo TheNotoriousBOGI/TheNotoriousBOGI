@@ -1,400 +1,91 @@
-// ######################################################################
-// ###                                                                ###
-// ###   Auswertesoftware fuer HAGER EHZ363... und EHZ163...          ###
-// ###                                                                ###
-// ###   Firmware-Version: 20211129                                   ###
-// ###                                                                ###
-// ###                                                                ###
-// ######################################################################
-
-//issues to resolve in this version:
-//--write log to internal memory and make available on page
-//--test sd-card
-//--save values to sd card
-//--write sending-statistka to log on internal memory
-//--write package to backlog-file if sending fails
-//--send backlog if server is available again
-//--
-//--
+// ########################################################################
+// ###                                                                  ###
+// ###   Reading software for HAGER EHZ363, EHZ163 and similar devices  ###
+// ###                                                                  ###
+// ###   Firmware-Version: 20220214                                     ###
+// ###                                                                  ###
+// ###                                                                  ###
+// ########################################################################
 
 
+//#define SERIALPRINT             //uncomment if serial output is wished
 
-//custom headers (include-folder)
+//custom headers (in include-folder)
 #include "obis.h"
-#include "FS.h"
-#include "SD.h"
-#include "SPI.h"
-#include "string.h"
-#include <SPIFFS.h>
-
-#include <WiFi.h>
-#include <WiFiSettings.h>
-#include <HTTPClient.h>
-#include <time.h>
-
-
-//device indentifiers
-char device_ID[MSIZE] = "SUITE_002";
-char firmwareVersion[MSIZE] = "2021-11-29";
-
-
-//webserver for ota-update
-#include <AsyncTCP.h>
-#include <ESPAsyncWebServer.h>
-#include <AsyncElegantOTA.h>;
-AsyncWebServer server(80);
-
-
-//webportal
-String Serveraddress = "";
-String Serveraddress_SML = "/sml";
-String Serveraddress_META = "/metadata";
-String Apikey = "";
-String Authorization = "";
-String Bearer = "Bearer ";
-bool checkbox_server = true;
-bool checkbox_apikey = false;
-bool checkbox_authorization = false;
-
-
-//WiFi info
-//const char *ntpServer = "pool.ntp.org";
-const char *ntpServer = "ptbtime1.ptb.de";  //changed for compatibility, pool.ntp.org takes too much time sometimes
-
-
-//timestamp function
-unsigned long initial_timestamp;
-unsigned long timestamp;
-unsigned long getTimestamp()
-{
-    time_t now;
-    struct tm timeinfo;
-    if (!getLocalTime(&timeinfo))
-    {
-        return (0);
-    }
-    time(&now);
-    return now;
-}
-
-
-//general device (ehz) information
-char ServerID_string[MSIZE];
-char ServerID_string_formatted[MSIZE];
-char eHZ_Message[MSIZE] = "";    // Zeichenpuffer der gelesenen Daten vom eHZ
-char manufacturer[MSIZE] = "hager";
-
+#include "webportal.h"
+#include "timestamp.h"
+#include "deviceinfo.h"
+#include "filefunctions.h"
+#include "sml.h"
 
 //sml analysis helpers
-char printstring[MSIZE];         // String als Zwischenspeicher fuer die Ausgabe auf der Konsole
-char Daten_Substring[MSIZE];     // Substring fuer Seriennummer
-char eHZ_zeichen[4];             // Zeichen - als HEX gewandelt, ohne Trennzeichen - vom eHZ ueber die optische RS232
-int eHZ_data = 0;                // Datenbyte ueber die optische RS232 vom eHZ eingelesen
-int Escape_Zaehler = 0;          // Zaehler fuer die ESCAPE Zeichen (0x1b) am Message-Ende
-int Escape = 0;                  // Flag, dass ESCAPE-Sequenz kam
-long int Zaehlvariable = 0;      // Zaehlvariable fuer eine kontinuierliche Nummerierung der Schleifendurchlaeufe
-long int PrintZaehlvariable = 0; // Zaehlvariable fuer die Durchnummerierung der ausgedruckten Zaehlerwerte
-int Werte_Empfangen = 0;         // Flag, wird gesetzt, wenn wenigstens 1 Datensatz empfangen wurde ---> Ausgabe
-int TL_Flag;                     // T/L Kenner des SML Protokolls
-int TL_Offset;                   // Hilfsvariable um die Daten auszuwerten ja nach T/L Kenner
-long int Offset = 0;             // Offset des Suchstrings
-char *B_Daten;                   // Pointer auf Datenbeginn des Auswerteteils
-char *Beginn;                    // Pointer auf Beginn der eHZ-Sendedaten
+char printstring[MSIZE];         // string buffer for console output
+char Daten_Substring[MSIZE];     // substring serial number
 
-
-//sml metadata
-long int inputSML = 0;
-long int sendAttempts = 0;
-long int sendAttemptsSuccessful = 0;
-long int sendAttemptsFailed = 0;
-long int backlog = 0;
-
-
-//device metadata
-long int upTime = 0;
-long int freeSpaceSD = 0;
-long int ramMaxLoad = 0;
-long int signalStrengthWifi = 0;
-
-
-//measured variables and helpers
-unsigned long int Zaehlernummer = 0; // Ausgelesene Werte aus dem Telegramm (Zaehlernummer)
-long int Age_Zaehlernummer = 0;      // "Alter" der Daten
-double Wirkleistung = 0;             // Ausgelesene Werte aus dem Telegramm (Wirkleistung)
-long int Age_Wirkleistung = 0;       // "Alter" der Daten
-double Wirkenergie = 0;              // Ausgelesene Werte aus dem Telegramm (Wirkenergie)
-long int Age_Wirkenergie = 0;        // "Alter" der Daten
-double WirkenergieT1 = 0;
-long int Age_WirkenergieT1 = 0;
-double WirkenergieT2 = 0;
-long int Age_WirkenergieT2 = 0;
-double Blindleistung_L1 = 0;
-long int Age_BlindleistungL1 = 0;
-double Blindleistung_L2 = 0;
-long int Age_BlindleistungL2 = 0;
-double Blindleistung_L3 = 0;
-long int Age_BlindleistungL3 = 0;
-double PhasenabweichungStromSpannung_L1 = 0;
-long int Age_PhasenabweichungStromSpannung_L1 = 0;
-double PhasenabweichungStromSpannung_L2 = 0;
-long int Age_PhasenabweichungStromSpannung_L2 = 0;
-double PhasenabweichungStromSpannung_L3 = 0;
-long int Age_PhasenabweichungStromSpannung_L3 = 0;
-double PhasenabweichungSpannungen_L1L2 = 0;
-long int Age_PhasenabweichungSpannungen_L1L2 = 0;
-double PhasenabweichungSpannungen_L1L3 = 0;
-long int Age_PhasenabweichungSpannungen_L1L3 = 0;
-double Wirkleistung_L1 = 0;       // Ausgelesene Werte aus dem Telegramm (Wirkleistung L1)
-long int Age_Wirkleistung_L1 = 0; // "Alter" der Daten
-double Wirkleistung_L2 = 0;       // Ausgelesene Werte aus dem Telegramm (Wirkleistung L2)
-long int Age_Wirkleistung_L2 = 0; // "Alter" der Daten
-double Wirkleistung_L3 = 0;       // Ausgelesene Werte aus dem Telegramm (Wirkleistung L3)
-long int Age_Wirkleistung_L3 = 0; // "Alter" der Daten
-double Spannung_L1 = 0;           // Ausgelesene Werte aus dem Telegramm (Spannung L1)
-long int Age_Spannung_L1 = 0;     // "Alter" der Daten
-double Spannung_L2 = 0;           // Ausgelesene Werte aus dem Telegramm (Spannung L2)
-long int Age_Spannung_L2 = 0;     // "Alter" der Daten
-double Spannung_L3 = 0;           // Ausgelesene Werte aus dem Telegramm (Spannung L3)
-long int Age_Spannung_L3 = 0;     // "Alter" der Daten
-double Strom_L1 = 0;              // Ausgelesene Werte aus dem Telegramm (Strom L1)
-long int Age_Strom_L1 = 0;        // "Alter" der Daten
-double Strom_L2 = 0;              // Ausgelesene Werte aus dem Telegramm (Strom L2)
-long int Age_Strom_L2 = 0;        // "Alter" der Daten
-double Strom_L3 = 0;              // Ausgelesene Werte aus dem Telegramm (Strom L3)
-long int Age_Strom_L3 = 0;        // "Alter" der Daten
-double Spannung_Max = 0;          // Ausgelesene Werte aus dem Telegramm (Spannung MAX)
-long int Age_Spannung_Max = 0;    // "Alter" der Daten
-double Spannung_Min = 0;          // Ausgelesene Werte aus dem Telegramm (Spannung MIN)
-long int Age_Spannung_Min = 0;    // "Alter" der Daten
-double Chiptemp = 0;              // Ausgelesene Werte aus dem Telegramm (Spannung MIN)
-long int Age_Chiptemp = 0;        // "Alter" der Daten
-double Chiptemp_Min = 0;
-long int Age_Chiptemp_Min = 0;
-double Chiptemp_Max = 0;
-long int Age_Chiptemp_Max = 0;
-double Chiptemp_Avg = 0;
-long int Age_Chiptemp_Avg = 0;
-
-
-//iteration counter
-int i = 0;           // Zaehlvariable fuer Schleifen
-
-
-//counter to control WiFi-connectivity
+//counters
+int i = 0;
 int connection_counter = 0;
-
 
 //define pins for serial input and output
 #define RXD2 16
 #define TXD2 17
 
 
-//FileFunctions###########################################################################################################################
-//list directories
-void listDir(fs::FS &fs, const char * dirname, uint8_t levels)
-{
-  Serial.printf("Listing directory: %s\n", dirname);
- 
-  File root = fs.open(dirname);
-  if (!root)
-     {
-       Serial.println("Failed to open directory");
-       return;
-     }
-  if (!root.isDirectory())
-     {
-       Serial.println("Not a directory");
-       return;
-     }
- 
-  File file = root.openNextFile();
-  while(file)
-    {
-       if (file.isDirectory())
-          {
-            Serial.print(" DIR : ");
-            Serial.println(file.name());
-            if (levels)
-               {
-                 listDir(fs, file.name(), levels -1);
-               }
-          }
-         else 
-          {
-            Serial.print(" FILE: ");
-            Serial.print(file.name());
-            Serial.print(" SIZE: ");
-            Serial.println(file.size());
-          }
-       file = root.openNextFile();
-   }
-}
-
-//create directory
-void createDir(fs::FS &fs, const char * path)
-{
-  Serial.printf("Creating Dir: %s\n", path);
-  if (fs.mkdir(path))
-     {
-       Serial.println("Dir created");
-     } 
-    else
-     {
-       Serial.println("mkdir failed");
-     }
-}
-
-//remove directory
-void removeDir(fs::FS &fs, const char * path)
-{
-  Serial.printf("Removing Dir: %s\n", path);
-  if (fs.rmdir(path))
-     {
-       Serial.println("Dir removed");
-     }
-    else
-     {
-       Serial.println("rmdir failed");
-     }
-}
-
-//read file
-void readFile(fs::FS &fs, const char * path)
-{
-  Serial.printf("Reading file: %s\n", path);
- 
-  File file = fs.open(path);
-  if (!file)
-     {
-       Serial.println("Failed to open file for reading");
-       return;
-     }
- 
-  Serial.print("Read from file: ");
-  while (file.available())
-    {
-      Serial.write(file.read());
-    }
-}
-
-//write file
-void writeFile(fs::FS &fs, const char * path, const char * message)
-{
-  Serial.printf("Writing file: %s\n", path);
- 
-  File file = fs.open(path, FILE_WRITE);
-  if (!file)
-     {
-       Serial.println("Failed to open file for writing");
-       return;
-     }
-  if (file.print(message))
-     {
-       Serial.println("File written");
-     }
-    else
-     {
-       Serial.println("Write failed");
-     }
-}
-
-//append to file
-void appendFile(fs::FS &fs, const char * path, const char * message)
-{
-  //Serial.printf("Appending to file: %s\n", path);
- 
-  File file = fs.open(path, FILE_APPEND);
-  if (!file)
-     {
-       //Serial.println("Failed to open file for appending");
-      return;
-     }
-  if (file.print(message))
-     {
-       //Serial.println("Message appended");
-     } 
-    else 
-     {
-       Serial.println("Append failed");
-     }
-}
-
-//rename file
-void renameFile(fs::FS &fs, const char * path1, const char * path2)
-{
-  Serial.printf("Renaming file %s to %s\n", path1, path2);
-  if (fs.rename(path1, path2)) 
-     {
-       Serial.println("File renamed");
-     } 
-    else
-     {
-       Serial.println("Rename failed");
-     }
-}
-
-//delete file
-void deleteFile(fs::FS &fs, const char * path)
-{
-  Serial.printf("Deleting file: %s\n", path);
-  if (fs.remove(path))
-     {
-       Serial.println("File deleted");
-     } 
-    else 
-     {
-       Serial.println("Delete failed");
-     }
-}
-
-
-
-
 //SETUP(START)############################################################################################################################
-//########################################################################################################################################
 void setup()
 {
     //start SPIFFS
     SPIFFS.begin(true);
 
+    //create logfile
+    writeFile(SPIFFS,"/log.txt","LOG\n");
+ 
     //open serial connection (console output)
     Serial.begin(115200);
 
-    //Open optical serial connection
+    //open optical serial connection
     Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
 
-    //print optical interface info
-    Serial.println("Serielle Schnittstelle 2 (eHZ):");
-    Serial.println("Serial Txd is on pin: " + String(TXD2));
-    Serial.println("Serial Rxd is on pin: " + String(RXD2));
-    Serial.println(" ");
+    #ifdef SERIALPRINT
+        //print optical interface info
+        Serial.println("Serielle Schnittstelle 2 (eHZ):");
+        Serial.println("Serial Txd is on pin: " + String(TXD2));
+        Serial.println("Serial Rxd is on pin: " + String(RXD2));
+        Serial.println(" ");
+    #endif
 
     //display device info on config page
+    WiFiSettings.hostname = device_ID;
+    WiFiSettings.heading("Sensor ID:");
     WiFiSettings.heading(device_ID);
-    WiFiSettings.heading(firmwareVersion);
 
-    // Define custom settings saved by WifiSettings
-    // These will return the default if nothing was set before
+    //Define custom settings saved by WifiSettings
+    //these will return the default if nothing was set before
+    //bool checkbox_useconfig_dummy = WiFiSettings.checkbox("Use config file");
     String Server_dummy = WiFiSettings.string("Server address", "default.example.org:443");
     bool checkbox_server_dummy = WiFiSettings.checkbox("Server", true);
     String Apikey_dummy = WiFiSettings.string("API key", "dm38qd0ajd3803e0jd320asfafveafeafafa");
     bool checkbox_apikey_dummy = WiFiSettings.checkbox("APIkey");
     String Authorization_dummy = WiFiSettings.string("Authorization Bearer", "Ndufqa9d3qh8d320fh4379fh438904hf8430f9h4herf947fgPUEFF");
     bool checkbox_authorization_dummy = WiFiSettings.checkbox("Bearer");
+    String Server_dummy_meta = WiFiSettings.string("Metadata Server address", "default.example.org:443");
+    bool checkbox_meta_dummy = WiFiSettings.checkbox("Medadata transfer");
 
     //reset connection counter
     connection_counter = 0;
 
-    // Connect to WiFi with a timeout of 30 seconds
-    // Launches the portal if the connection failed
+    // try to connect to WiFi with a timeout of 30 seconds - launch portal if connection fails
     WiFiSettings.connect(true, 30);
     
-    Serveraddress = Server_dummy;
-    Apikey = Apikey_dummy;
-    Authorization = Authorization_dummy;
-    Bearer += Authorization;
+    //checkbox_useconfig = checkbox_useconfig_dummy;
+    Serveraddress   = Server_dummy;
+    Serveraddress_m = Server_dummy_meta;
+    Apikey          = Apikey_dummy;
+    Authorization   = Authorization_dummy;
+    Bearer         += Authorization;
     checkbox_server = checkbox_server_dummy;
     checkbox_apikey = checkbox_apikey_dummy;
+    checkbox_meta   = checkbox_meta_dummy;
     checkbox_authorization = checkbox_authorization_dummy;
 
     //get time
@@ -403,61 +94,65 @@ void setup()
     //start update-functionality
     AsyncElegantOTA.begin(&server);
     server.begin();
-    Serial.println("HTTP server started");
+
+    #ifdef SERIALPRINT
+        Serial.println("HTTP update server started");
+    #endif
 
     //set initial timestamp for calculation of uptime
     initial_timestamp = getTimestamp();
 
     //start SD card
     if(!SD.begin()){
-        Serial.println("Card Mount Failed");
+        #ifdef SERIALPRINT
+            Serial.println("Card Mount Failed");
+        #endif
         return;
     }
 
     uint8_t cardType = SD.cardType();
 
-    Serial.print("SD Card Type: ");
-    if(cardType == CARD_NONE){
-        Serial.println("No SD card attached");
-        return;
-    } else if(cardType == CARD_MMC){
-        Serial.println("MMC");
-    } else if(cardType == CARD_SD){
-        Serial.println("SDSC");
-    } else if(cardType == CARD_SDHC){
-        Serial.println("SDHC");
-    } else {
-        Serial.println("UNKNOWN");
-    }
+    #ifdef SERIALPRINT
+        Serial.print("SD Card Type: ");
+        if(cardType == CARD_NONE){
+            Serial.println("No SD card attached");
+            return;
+        } else if(cardType == CARD_MMC){
+            Serial.println("MMC");
+        } else if(cardType == CARD_SD){
+            Serial.println("SDSC");
+        } else if(cardType == CARD_SDHC){
+            Serial.println("SDHC");
+        } else {
+            Serial.println("UNKNOWN");
+        }
+    #endif
+
     uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-    Serial.printf("SD Card Size: %lluMB\n", cardSize);
+
+    #ifdef SERIALPRINT
+        Serial.printf("SD Card Size: %lluMB\n", cardSize);
+    #endif
+
+    writeFile(SD, "/backlog.txt","{");
 }
 
 
 //MAIN######################################################################################################################################################################
 void loop()
 {
-
-createDir(SD, "/logs");
-writeFile(SD, "/logs/LOG.txt", "LOG-File erstellt\n");
-appendFile(SD, "/logs/LOG.txt", "LOGFile:\n");
-appendFile(SD, "/logs/LOG.txt", "1. \n");
-appendFile(SD, "/logs/LOG.txt", "2. \n");
-appendFile(SD, "/logs/LOG.txt", "3. \r\n");
-
-appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
     //run update server
     AsyncElegantOTA.loop();
 
     if (Serial2.available())
-    { //if serial input is available+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
+    {
         //read input from optical input as integer
         eHZ_data = Serial2.read();
 
         //check for escape sequence in SML protocol 0x1b 0x1b 0x1b 0x1b
         if (eHZ_data == 27)
-        { //Escape-Zeichen 0x1b, 4x hintereinander
+        { 
+            //Escape-sequence four times 0x1b
             Escape_Zaehler++;
         }
         else
@@ -468,45 +163,35 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
         //if escape sequence is complete => evaluate data
         if (Escape_Zaehler == 4)
         {
-            Escape = 1; // Datentelegramm vollstaendig empfangen, Auswertung kann nun erfolgen
+            Escape = 1; // data telegram complete, start evaluation
                         // ===================================================================
                         // ==
-                        // ==
-                        // == Ausgabe in der Sektion Werte_Empfangen == 1...
+                        // == Ouptut in the section Werte_Empfangen == 1...
                         // ==
                         // ===================================================================
 
-            // Werte auswerten
-            Zaehlvariable++; // Schleifenzaehler hochzaehlen und Wert im Terminal ausgeben
-
-            //debug info
-            if ((DEBUG) < 0x8000)
-            {
-                Serial.println("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"); // Trennzeile ausgeben
-                sprintf(printstring, "%09ld >>>>", Zaehlvariable);
-                Serial.println(printstring);
-                Serial.println("");
-            }
+            // evaluation
+            Zaehlvariable++; // loop counter
 
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Seriennummer des Zaehlers auswerten
+            // =   Serial number of eHZ
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-            Beginn = strstr(eHZ_Message, eHZ_Message);        // Pointer auf den Anfang der Message
-            B_Daten = strstr(eHZ_Message, KENN_SERIENNUMMER); // Seriennummer-Kennung suchen und dann auswerten
+            Beginn = strstr(eHZ_Message, eHZ_Message);        // pointer to beginning of sml-message
+            B_Daten = strstr(eHZ_Message, KENN_SERIENNUMMER); // search serial number obis
 
-            Offset = B_Daten - Beginn; // Offset der Nutzdaten dieses Threads berechnen
+            Offset = B_Daten - Beginn; // calculate offset
             if (Offset > 0)
             {
                 for (i = 0; i < LENGHT_SERIENNUMMER; i++)
-                { // ... und Nutzdaten dieses Threads kopieren
+                { //copy data of this thread
                     Daten_Substring[i] = eHZ_Message[i + Offset + OFFSET_SERIENNUMMER];
                 }
                 Daten_Substring[LENGHT_SERIENNUMMER] = '\0';
 
-                Zaehlernummer = 0; // ... und Nutzdaten dieses Threads auswerten
+                Zaehlernummer = 0; //evaluate data of the thread
                 Zaehlernummer = 16 * Zaehlernummer + Chr_2_Number(Daten_Substring[4]);
                 Zaehlernummer = 16 * Zaehlernummer + Chr_2_Number(Daten_Substring[5]);
                 Zaehlernummer = 16 * Zaehlernummer + Chr_2_Number(Daten_Substring[6]);
@@ -516,46 +201,28 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Zaehlernummer = 16 * Zaehlernummer + Chr_2_Number(Daten_Substring[10]);
                 Zaehlernummer = 16 * Zaehlernummer + Chr_2_Number(Daten_Substring[11]);
 
-                Age_Zaehlernummer = 0; // ganz aktuelle Daten
-                Werte_Empfangen = 1;   // Ausgabe anregen
-
-                if (((DEBUG)&0x01) != 0)
-                {                                      // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_SERIENNUMMER); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_SERIENNUMMER);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("SNR+SS:  "); // Kennung ausgeben
-                    Serial.println(KENN_SERIENNUMMER);
-                    Serial.print("SNR_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("SNR-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("SNR#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08ld", Zaehlernummer);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
+                Age_Zaehlernummer = 0; // most recent data
+                Werte_Empfangen = 1;   // trigger output
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Server-ID des Zaehlers auswerten
+            // =   Server-ID
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-            Beginn = strstr(eHZ_Message, eHZ_Message);    // Pointer auf den Anfang der Message
-            B_Daten = strstr(eHZ_Message, KENN_SERVERID); // Seriennummer-Kennung suchen und dann auswerten
+            Beginn = strstr(eHZ_Message, eHZ_Message);
+            B_Daten = strstr(eHZ_Message, KENN_SERVERID);
 
-            Offset = B_Daten - Beginn; // Offset der Nutzdaten dieses Threads berechnen
+            Offset = B_Daten - Beginn; // Calculate offset
             if (Offset > 0)
             {
                 for (i = 0; i < LENGHT_SERVERID; i++)
-                { // ... und Nutzdaten dieses Threads kopieren
+                {
                     //Daten_Substring[i] = eHZ_Message[i+Offset+OFFSET_SERVERID];
                     ServerID_string[i] = eHZ_Message[i + Offset + OFFSET_SERVERID];
                 }
@@ -591,34 +258,30 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 ServerID_string_formatted[27] = ServerID_string[18];
                 ServerID_string_formatted[28] = ServerID_string[19];
                 ServerID_string_formatted[29] = '\0';
-
-                //Serial.println("Server ID:");
-                //Serial.println(ServerID_string);
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Wirkenergie des Zaehlers auswerten
+            // =   Wirkenergie
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-            Beginn = strstr(eHZ_Message, eHZ_Message);       // Pointer auf den Anfang der Message
-            B_Daten = strstr(eHZ_Message, KENN_WIRKENERGIE); // Wirkenergie-Kennung suchen und dann auswerten
+            Beginn = strstr(eHZ_Message, eHZ_Message);       // Pointer to beginning of sml message
+            B_Daten = strstr(eHZ_Message, KENN_WIRKENERGIE); // search Wirkenergie-Kennung
 
-            Offset = B_Daten - Beginn; // Offset der Nutzdaten dieses Threads berechnen
+            Offset = B_Daten - Beginn; // Calculate Offset
             if (Offset > 0)
             {
                 for (i = 0; i < LENGHT_WIRKENERGIE; i++)
-                { // ... und Nutzdaten dieses Threads kopieren
+                {
                     Daten_Substring[i] = eHZ_Message[i + Offset + OFFSET_WIRKENERGIE];
                 }
                 Daten_Substring[LENGHT_WIRKENERGIE] = '\0';
 
-                // T_L Wert auswerten um die nachfolgenden Daten korrekt zu interpretieren (Datenlänge 8/16/24.../56/64 bit
                 TL_Flag = 16 * Chr_2_Number(Daten_Substring[0]) + Chr_2_Number(Daten_Substring[1]); // Laenge der Daten erkennen
                                                                                                     // 0x52 =>  8 bit
                                                                                                     // 0x53 => 16 bit
@@ -627,9 +290,9 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                                                                                                     // 0x59 => 64 bit
                 TL_Offset = 0;                                                                      // Offset um dynamisches Lesen der Leistung zu ermöglichen
 
-                Wirkenergie = 0.0; // ... und Nutzdaten dieses Threads auswerten
+                Wirkenergie = 0.0;
                 switch (TL_Flag)
-                { // dynamische Datenlaengenanpassung.... da waren Irre am Werk!!!
+                { 
                 case 0x59:
                 {
                     Wirkenergie = 16.0 * Wirkenergie + 1.0 * Chr_2_Number(Daten_Substring[(2 + TL_Offset)]);
@@ -682,55 +345,33 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                     Wirkenergie = 99999999999999;
                 }
 
-                //Serial.println(TL_Offset);
-                //Serial.println("HUHU");
-
                 Wirkenergie = Wirkenergie / 10.0; // Einheit Wh, 1 Nachkommastelle
-                Age_Wirkenergie = 0;              // ganz aktuelle Daten
-                Werte_Empfangen = 1;              // Ausgabe anregen
-
-                if (((DEBUG)&0x04) != 0)
-                {                                     // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_WIRKENERGIE); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_WIRKENERGIE);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("Msg+SS:  "); // Kennung ausgeben
-                    Serial.println(KENN_WIRKENERGIE);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.4f", Wirkenergie);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
+                Age_Wirkenergie = 0;
+                Werte_Empfangen = 1;              // trigger output
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   WirkenergieT1 des Zaehlers auswerten
+            // =   WirkenergieT1
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-            Beginn = strstr(eHZ_Message, eHZ_Message);         // Pointer auf den Anfang der Message
-            B_Daten = strstr(eHZ_Message, KENN_WIRKENERGIET1); // Wirkenergie-Kennung suchen und dann auswerten
+            Beginn = strstr(eHZ_Message, eHZ_Message);         // pointer to beginning of sml-message
+            B_Daten = strstr(eHZ_Message, KENN_WIRKENERGIET1); // search WirkenergieT1-Kennung
 
-            Offset = B_Daten - Beginn; // Offset der Nutzdaten dieses Threads berechnen
+            Offset = B_Daten - Beginn;
             if (Offset > 0)
             {
                 for (i = 0; i < LENGHT_WIRKENERGIET1; i++)
-                { // ... und Nutzdaten dieses Threads kopieren
+                {
                     Daten_Substring[i] = eHZ_Message[i + Offset + OFFSET_WIRKENERGIET1];
                 }
                 Daten_Substring[LENGHT_WIRKENERGIET1] = '\0';
 
-                // T_L Wert auswerten um die nachfolgenden Daten korrekt zu interpretieren (Datenlänge 8/16/24.../56/64 bit
                 TL_Flag = 16 * Chr_2_Number(Daten_Substring[0]) + Chr_2_Number(Daten_Substring[1]); // Laenge der Daten erkennen
                                                                                                     // 0x52 =>  8 bit
                                                                                                     // 0x53 => 16 bit
@@ -739,9 +380,9 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                                                                                                     // 0x59 => 64 bit
                 TL_Offset = 0;                                                                      // Offset um dynamisches Lesen der Leistung zu ermöglichen
 
-                WirkenergieT1 = 0.0; // ... und Nutzdaten dieses Threads auswerten
+                WirkenergieT1 = 0.0; 
                 switch (TL_Flag)
-                { // dynamische Datenlaengenanpassung.... da waren Irre am Werk!!!
+                {
                 case 0x59:
                 {
                     WirkenergieT1 = 16.0 * WirkenergieT1 + 1.0 * Chr_2_Number(Daten_Substring[(2 + TL_Offset)]);
@@ -794,39 +435,18 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                     WirkenergieT1 = 99999999999999;
                 }
 
-                //Serial.println(TL_Offset);
-                //Serial.println("HUHU");
-
                 WirkenergieT1 = WirkenergieT1 / 10.0; // Einheit Wh, 1 Nachkommastelle
                 Age_WirkenergieT1 = 0;                // ganz aktuelle Daten
                 Werte_Empfangen = 1;                  // Ausgabe anregen
-
-                if (((DEBUG)&0x04) != 0)
-                {                                       // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_WIRKENERGIET1); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_WIRKENERGIET1);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("Msg+SS:  "); // Kennung ausgeben
-                    Serial.println(KENN_WIRKENERGIET1);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.4f", WirkenergieT1);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   WirkenergieT2 des Zaehlers auswerten
+            // =   WirkenergieT2
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -906,39 +526,18 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                     WirkenergieT2 = 99999999999999;
                 }
 
-                //Serial.println(TL_Offset);
-                //Serial.println("HUHU");
-
                 WirkenergieT2 = WirkenergieT2 / 10.0; // Einheit Wh, 1 Nachkommastelle
                 Age_WirkenergieT2 = 0;                // ganz aktuelle Daten
                 Werte_Empfangen = 1;                  // Ausgabe anregen
-
-                if (((DEBUG)&0x04) != 0)
-                {                                       // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_WIRKENERGIET2); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_WIRKENERGIET2);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("Msg+SS:  "); // Kennung ausgeben
-                    Serial.println(KENN_WIRKENERGIET2);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.4f", WirkenergieT2);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Wirkleistung des Zaehlers auswerten
+            // =   Wirkleistung
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -1005,33 +604,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Wirkleistung = Wirkleistung / 1.0; // Einheit W, 0 Nachkommastellen
                 Age_Wirkleistung = 0;              // ganz aktuelle Daten
                 Werte_Empfangen = 1;               // Ausgabe anregen
-
-                if (((DEBUG)&0x02) != 0)
-                {                                      // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_WIRKLEISTUNG); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_WIRKLEISTUNG);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_WIRKLEISTUNG);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Wirkleistung);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Wirkleistung L1 des Zaehlers auswerten
+            // =   Wirkleistung L1
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -1099,33 +680,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Wirkleistung_L1 = Wirkleistung_L1 / 10.0; // Einheit W, 1 Nachkommastelle
                 Age_Wirkleistung_L1 = 0;                  // ganz aktuelle Daten
                 Werte_Empfangen = 1;                      // Ausgabe anregen
-
-                if (((DEBUG)&0x08) != 0)
-                {                                         // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_WIRKLEISTUNG_L1); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_WIRKLEISTUNG_L1);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_WIRKLEISTUNG_L1);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Wirkleistung_L1);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Blindleistung L1 des Zaehlers auswerten
+            // =   Blindleistung L1
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -1193,33 +756,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Blindleistung_L1 = Blindleistung_L1 / 10.0; // Einheit var, 1 Nachkommastelle
                 Age_BlindleistungL1 = 0;                    // ganz aktuelle Daten
                 Werte_Empfangen = 1;                        // Ausgabe anregen
-
-                if (((DEBUG)&0x08) != 0)
-                {                                          // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_BLINDLEISTUNG_L1); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_BLINDLEISTUNG_L1);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_BLINDLEISTUNG_L1);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Blindleistung_L1);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Strom L1 des Zaehlers auswerten
+            // =   Strom L1
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -1288,33 +833,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Strom_L1 = Strom_L1 / 100.0; // Einheit A, 2 Nachkommastellen
                 Age_Strom_L1 = 0;            // ganz aktuelle Daten
                 Werte_Empfangen = 1;         // Ausgabe anregen
-
-                if (((DEBUG)&0x200) != 0)
-                {                                      // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_WIRKLEISTUNG); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_WIRKLEISTUNG);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_WIRKLEISTUNG);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Strom_L1);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Spannung L1 des Zaehlers auswerten
+            // =   Spannung L1
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -1382,33 +909,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Spannung_L1 = Spannung_L1 / 100.0; // Einheit V, 2 Nachkommastellen
                 Age_Spannung_L1 = 0;               // ganz aktuelle Daten
                 Werte_Empfangen = 1;               // Ausgabe anregen
-
-                if (((DEBUG)&0x40) != 0)
-                {                                     // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_SPANNUNG_L1); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_SPANNUNG_L1);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_SPANNUNG_L1);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Spannung_L1);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Phasenabweichung Strom/Spannung L1 des Zaehlers auswerten
+            // =   Phasenabweichung Strom/Spannung L1
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -1475,33 +984,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 PhasenabweichungStromSpannung_L1 = acos(PhasenabweichungStromSpannung_L1 / 65535.0)*180/PI; // Einheit cos(phi), 0 Nachkommastellen
                 Age_PhasenabweichungStromSpannung_L1 = 0;                                  // ganz aktuelle Daten
                 Werte_Empfangen = 1;                                                       // Ausgabe anregen
-
-                if (((DEBUG)&0x02) != 0)
-                {                                              // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_PHASENABWEICHUNGSSL1); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_PHASENABWEICHUNGSSL1);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_PHASENABWEICHUNGSSL1);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", PhasenabweichungStromSpannung_L1);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Wirkleistung L2 des Zaehlers auswerten
+            // =   Wirkleistung L2
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -1569,33 +1060,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Wirkleistung_L2 = Wirkleistung_L2 / 10.0; // Einheit W, 1 Nachkommastellen
                 Age_Wirkleistung_L2 = 0;                  // ganz aktuelle Daten
                 Werte_Empfangen = 1;                      // Ausgabe anregen
-
-                if (((DEBUG)&0x10) != 0)
-                {                                         // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_WIRKLEISTUNG_L2); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_WIRKLEISTUNG_L2);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_WIRKLEISTUNG_L2);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Wirkleistung_L2);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Blindleistung L2 des Zaehlers auswerten
+            // =   Blindleistung L2 
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -1663,33 +1136,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Blindleistung_L2 = Blindleistung_L2 / 10.0; // Einheit var, 1 Nachkommastellen
                 Age_BlindleistungL2 = 0;                    // ganz aktuelle Daten
                 Werte_Empfangen = 1;                        // Ausgabe anregen
-
-                if (((DEBUG)&0x10) != 0)
-                {                                          // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_BLINDLEISTUNG_L2); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_BLINDLEISTUNG_L2);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_BLINDLEISTUNG_L2);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Blindleistung_L2);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Strom L2 des Zaehlers auswerten
+            // =   Strom L2 
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -1756,33 +1211,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Strom_L2 = Strom_L2 / 100.0; // Einheit A, 2 Nachkommastellen
                 Age_Strom_L2 = 0;            // ganz aktuelle Daten
                 Werte_Empfangen = 1;         // Ausgabe anregen
-
-                if (((DEBUG)&0x400) != 0)
-                {                                      // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_WIRKLEISTUNG); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_WIRKLEISTUNG);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_WIRKLEISTUNG);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Strom_L2);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Spannung L2 des Zaehlers auswerten
+            // =   Spannung L2 
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -1850,33 +1287,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Spannung_L2 = Spannung_L2 / 100.0; // Einheit V, 2 Nachkommastellen
                 Age_Spannung_L2 = 0;               // ganz aktuelle Daten
                 Werte_Empfangen = 1;               // Ausgabe anregen
-
-                if (((DEBUG)&0x80) != 0)
-                {                                      // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_WIRKLEISTUNG); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_WIRKLEISTUNG);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_WIRKLEISTUNG);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Spannung_L2);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Phasenabweichung Strom/Spannung L2 des Zaehlers auswerten
+            // =   Phasenabweichung Strom/Spannung L2 
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -1943,33 +1362,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 PhasenabweichungStromSpannung_L2 = acos(PhasenabweichungStromSpannung_L2 / 65535.0)*180/PI; // Einheit cos(phi), 0 Nachkommastellen
                 Age_PhasenabweichungStromSpannung_L2 = 0;                                  // ganz aktuelle Daten
                 Werte_Empfangen = 1;                                                       // Ausgabe anregen
-
-                if (((DEBUG)&0x02) != 0)
-                {                                              // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_PHASENABWEICHUNGSSL2); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_PHASENABWEICHUNGSSL2);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_PHASENABWEICHUNGSSL2);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", PhasenabweichungStromSpannung_L2);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Wirkleistung L3 des Zaehlers auswerten
+            // =   Wirkleistung L3 
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -2037,33 +1438,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Wirkleistung_L3 = Wirkleistung_L3 / 10.0; // Einheit W, 1 Nachkommastellen
                 Age_Wirkleistung_L3 = 0;                  // ganz aktuelle Daten
                 Werte_Empfangen = 1;                      // Ausgabe anregen
-
-                if (((DEBUG)&0x20) != 0)
-                {                                         // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_WIRKLEISTUNG_L3); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_WIRKLEISTUNG_L3);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_WIRKLEISTUNG_L3);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Wirkleistung_L3);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Blindleistung L3 des Zaehlers auswerten
+            // =   Blindleistung L3 
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -2131,33 +1514,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Blindleistung_L3 = Blindleistung_L3 / 10.0; // Einheit var, 1 Nachkommastellen
                 Age_BlindleistungL3 = 0;                    // ganz aktuelle Daten
                 Werte_Empfangen = 1;                        // Ausgabe anregen
-
-                if (((DEBUG)&0x20) != 0)
-                {                                          // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_BLINDLEISTUNG_L3); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_BLINDLEISTUNG_L3);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_BLINDLEISTUNG_L3);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Blindleistung_L3);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Strom L3 des Zaehlers auswerten
+            // =   Strom L3 
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -2225,33 +1590,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Strom_L3 = Strom_L3 / 100.0; // Einheit A, 2 Nachkommastellen
                 Age_Strom_L3 = 0;            // ganz aktuelle Daten
                 Werte_Empfangen = 1;         // Ausgabe anregen
-
-                if (((DEBUG)&0x800) != 0)
-                {                                  // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_STROM_L3); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_STROM_L3);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_STROM_L3);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Strom_L3);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Spannung L3 des Zaehlers auswerten
+            // =   Spannung L3 
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -2318,33 +1665,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Spannung_L3 = Spannung_L3 / 100.0; // Einheit V, 2 Nachkommastellen
                 Age_Spannung_L3 = 0;               // ganz aktuelle Daten
                 Werte_Empfangen = 1;               // Ausgabe anregen
-
-                if (((DEBUG)&0x100) != 0)
-                {                                     // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_SPANNUNG_L3); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_SPANNUNG_L3);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_SPANNUNG_L3);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Spannung_L3);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Phasenabweichung Strom/Spannung L3 des Zaehlers auswerten
+            // =   Phasenabweichung Strom/Spannung L3 
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -2411,33 +1740,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 PhasenabweichungStromSpannung_L3 = acos(PhasenabweichungStromSpannung_L3 / 65535.0)*180/PI; // Einheit cos(phi), 0 Nachkommastellen
                 Age_PhasenabweichungStromSpannung_L3 = 0;                                  // ganz aktuelle Daten
                 Werte_Empfangen = 1;                                                       // Ausgabe anregen
-
-                if (((DEBUG)&0x02) != 0)
-                {                                              // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_PHASENABWEICHUNGSSL3); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_PHASENABWEICHUNGSSL3);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_PHASENABWEICHUNGSSL3);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", PhasenabweichungStromSpannung_L3);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Phasenabweichung Spannungen L1/L2 des Zaehlers auswerten
+            // =   Phasenabweichung Spannungen L1/L2 
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -2504,33 +1815,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 PhasenabweichungSpannungen_L1L2 = acos(PhasenabweichungSpannungen_L1L2 / 65535.0)*180/PI; // Einheit cos(phi), 0 Nachkommastellen
                 Age_PhasenabweichungSpannungen_L1L2 = 0;                                 // ganz aktuelle Daten
                 Werte_Empfangen = 1;                                                     // Ausgabe anregen
-
-                if (((DEBUG)&0x02) != 0)
-                {                                              // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_PHASENABWEICHUNGL1L2); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_PHASENABWEICHUNGL1L2);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_PHASENABWEICHUNGL1L2);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", PhasenabweichungSpannungen_L1L2);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Phasenabweichung Spannungen L1/L3 des Zaehlers auswerten
+            // =   Phasenabweichung Spannungen L1/L3 
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -2597,28 +1890,10 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 PhasenabweichungSpannungen_L1L3 = acos(PhasenabweichungSpannungen_L1L3 / 65535.0)*180/PI; // Einheit cos(phi), 0 Nachkommastellen
                 Age_PhasenabweichungSpannungen_L1L3 = 0;                                 // ganz aktuelle Daten
                 Werte_Empfangen = 1;                                                     // Ausgabe anregen
-
-                if (((DEBUG)&0x02) != 0)
-                {                                              // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_PHASENABWEICHUNGL1L3); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_PHASENABWEICHUNGL1L3);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_PHASENABWEICHUNGL1L3);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", PhasenabweichungSpannungen_L1L3);
-                    Serial.println(printstring);
-                    Serial.println(""); 
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -2692,33 +1967,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Chiptemp = Chiptemp / 10.0; // Einheit °C, 1 Nachkommastellen
                 Age_Chiptemp = 0;           // ganz aktuelle Daten
                 Werte_Empfangen = 1;        // Ausgabe anregen
-
-                if (((DEBUG)&0x4000) != 0)
-                {                                  // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_CHIPTEMP); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_CHIPTEMP);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_CHIPTEMP);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.1f", Chiptemp);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Spannung MIN des Zaehlers auswerten
+            // =   Spannung MIN 
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -2787,33 +2044,15 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Spannung_Min = Spannung_Min / 1.0; // Einheit V, 0 Nachkommastellen
                 Age_Spannung_Min = 0;              // ganz aktuelle Daten
                 Werte_Empfangen = 1;               // Ausgabe anregen
-
-                if (((DEBUG)&0x2000) != 0)
-                {                                      // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_SPANNUNG_MIN); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_SPANNUNG_MIN);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_SPANNUNG_MIN);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Spannung_Min);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
-            // =   Spannung MAX des Zaehlers auswerten
+            // =   Spannung MAX 
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -2882,28 +2121,10 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Spannung_Max = Spannung_Max / 1.0; // Einheit V, 0 Nachkommastellen
                 Age_Spannung_Max = 0;              // ganz aktuelle Daten
                 Werte_Empfangen = 1;               // Ausgabe anregen
-
-                if (((DEBUG)&0x1000) != 0)
-                {                                      // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_SPANNUNG_MAX); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_SPANNUNG_MAX);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_SPANNUNG_MAX);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.0f", Spannung_Max);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -2977,28 +2198,10 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Chiptemp_Min = Chiptemp_Min / 1.0; // Einheit °C, 1 Nachkommastellen
                 Age_Chiptemp_Min = 0;              // ganz aktuelle Daten
                 Werte_Empfangen = 1;               // Ausgabe anregen
-
-                if (((DEBUG)&0x4000) != 0)
-                {                                     // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_CHIPTEMPMIN); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_CHIPTEMPMIN);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_CHIPTEMPMIN);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.1f", Chiptemp_Min);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -3072,28 +2275,10 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Chiptemp_Max = Chiptemp_Max / 1.0; // Einheit °C, 1 Nachkommastellen
                 Age_Chiptemp_Max = 0;              // ganz aktuelle Daten
                 Werte_Empfangen = 1;               // Ausgabe anregen
-
-                if (((DEBUG)&0x4000) != 0)
-                {                                     // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_CHIPTEMPMAX); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_CHIPTEMPMAX);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_CHIPTEMPMAX);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.1f", Chiptemp_Max);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -3167,46 +2352,18 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Chiptemp_Avg = Chiptemp_Avg / 1.0; // Einheit °C, 1 Nachkommastellen
                 Age_Chiptemp_Avg = 0;              // ganz aktuelle Daten
                 Werte_Empfangen = 1;               // Ausgabe anregen
-
-                if (((DEBUG)&0x4000) != 0)
-                {                                     // Debug-Messages dieses Threads ausgeben
-                    Serial.println(TEXT_CHIPTEMPAVG); // Kennung des Threads ausgeben
-                    Serial.println(OBIS_CHIPTEMPAVG);
-                    Serial.print("MSG:     "); // eHZ-Message ausgeben
-                    Serial.println(eHZ_Message);
-                    Serial.print("KENN  :  "); // Kennung ausgeben
-                    Serial.println(KENN_CHIPTEMPAVG);
-                    Serial.print("Msg_SS:  "); // Beginn der Daten mit Kennung ausgeben
-                    Serial.println(B_Daten);
-                    Serial.print("Msg-STR> "); // Daten Substring nach Entfernen der Kennung
-                    Serial.println(Daten_Substring);
-                    Serial.print("Msg#     "); // Nutzdaten ausgeben
-                    sprintf(printstring, "%08.1f", Chiptemp_Avg);
-                    Serial.println(printstring);
-                    Serial.println("");
-                }
             }
             // -------------------------------------------------------------------------------------------------------
             // =
-            // =   Thread Ende
+            // =   Thread Ending
             // =
             // -------------------------------------------------------------------------------------------------------
-
-            if ((DEBUG) < 0x800000)
-            {
-                Serial.println("------------------------------------------------------------------"); // Trennzeile ausgeben
-            }
 
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
             // =
             // =   Gesammelte Werte können ab hier verarbeitet werden
             // =
             // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
-            if (((DEBUG)&0x800000) == 0)
-            {
-                Werte_Empfangen = 2; // Momentan Ausgabe unterdruecken
-            }
 
             if (Werte_Empfangen == 1)
             {
@@ -3217,11 +2374,7 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 if (timestamp != 0)
                 {
                     HTTPClient http;
-                    //   http.begin("https://zuse.icas.fh-dortmund.de:2443/ict-gw/sml");
-                    //   http.addHeader("x-api-key","lz7L445xjHLvBUvr5zmwJf4tmRTeIQCX");
-                    //   http.addHeader("Authorization","Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJrTEsxVDYyTXJId1UwMXMxOWtYeVNzVkI4eFpzNkdnNCJ9.MKNoOz79a8oms-7mIb3kU2j6NdrjaDzh4lzqX6z9zCQ");
-                    //   http.addHeader("x-host-override","sdc-service-api");
-                    //   http.addHeader("Content-Type", "application/json");
+
                     http.begin(Serveraddress+Serveraddress_SML);
                     if (checkbox_apikey)
                     {
@@ -3237,7 +2390,7 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
 
                     String httpRequestData = "{\"serverID\": \"" + String(ServerID_string_formatted) + "\",\"timestamp\":" + String(timestamp) + "000,\"channel\": [{\"obis\": \"0100010800ff\",\"description\": \"Wirkenergie Bezug Gesamt\",\"value\":" + String(Wirkenergie) + " ,\"unit\": \"WATT_HOUR\"},{\"obis\": \"0100010801ff\",\"description\": \"Wirkenergie Bezug Tarif 1\",\"value\": " + String(WirkenergieT1) + " ,\"unit\": \"WATT_HOUR\"},{\"obis\": \"0100010802ff\",\"description\": \"Wirkenergie Bezug Tarif 2\",\"value\": " + String(WirkenergieT2) + " ,\"unit\": \"WATT_HOUR\"},{\"obis\": \"0100100700ff\",\"description\": \"Momentanleistung Gesamt\",\"value\": " + String(Wirkleistung) + " ,\"unit\": \"WATT\"},{\"obis\": \"0100240700ff\",\"description\": \"Wirkleistung L1\",\"value\": " + String(Wirkleistung_L1) + " ,\"unit\": \"WATT\"},{\"obis\": \"0100170700ff\",\"description\": \"Blindleistung L1\",\"value\": " + String(Blindleistung_L1) + " ,\"unit\": \"VAR\"},{\"obis\": \"01001f0700ff\",\"description\": \"Strom L1\",\"value\": " + String(Strom_L1) + " ,\"unit\": \"AMPERE\"},{\"obis\": \"0100200700ff\",\"description\": \"Spannung L1\",\"value\":" + String(Spannung_L1) + " ,\"unit\": \"VOLT\"},{\"obis\": \"0100510704ff\",\"description\": \"Phasenanweichung Strom/Spannung L1\",\"value\": " + String(PhasenabweichungStromSpannung_L1) + " ,\"unit\": \"DEGREE\"},{\"obis\": \"0100380700ff\",\"description\": \"Wirkleistung L2\",\"value\": " + String(Wirkleistung_L2) + " ,\"unit\": \"WATT\"},{\"obis\": \"01002b0700ff\",\"description\": \"Blindleistung L2\",\"value\": " + String(Blindleistung_L2) + " ,\"unit\": \"VAR\"},{\"obis\": \"0100330700ff\",\"description\": \"Strom L2\",\"value\": " + String(Strom_L2) + " ,\"unit\": \"AMPERE\"},{\"obis\": \"0100340700ff\",\"description\": \"Spannung L2\",\"value\":" + String(Spannung_L2) + " ,\"unit\": \"VOLT\"},{\"obis\": \"010051070fff\",\"description\": \"Phasenanweichung Strom/Spannung L2\",\"value\": " + String(PhasenabweichungStromSpannung_L2) + " ,\"unit\": \"DEGREE\"},{\"obis\": \"01004c0700ff\",\"description\": \"Wirkleistung L3\",\"value\": " + String(Wirkleistung_L3) + " ,\"unit\": \"WATT\"},{\"obis\": \"01003f0700ff\",\"description\": \"Blindleistung L3\",\"value\": " + String(Blindleistung_L3) + " ,\"unit\": \"VAR\"},{\"obis\": \"0100470700ff\",\"description\": \"Strom L3\",\"value\": " + String(Strom_L3) + " ,\"unit\": \"AMPERE\"},{\"obis\": \"0100480700ff\",\"description\": \"Spannung L3\",\"value\":" + String(Spannung_L3) + " ,\"unit\": \"VOLT\"},{\"obis\": \"010051071aff\",\"description\": \"Phasenanweichung Strom/Spannung L3\",\"value\": " + String(PhasenabweichungStromSpannung_L3) + " ,\"unit\": \"DEGREE\"},{\"obis\": \"0100510701ff\",\"description\": \"Phasenanweichung Spannungen L1/L2\",\"value\": " + String(PhasenabweichungSpannungen_L1L2) + " ,\"unit\": \"DEGREE\"},{\"obis\": \"0100510702ff\",\"description\": \"Phasenanweichung Spannungen L1/L3\",\"value\": " + String(PhasenabweichungSpannungen_L1L3) + " ,\"unit\": \"DEGREE\"},{\"obis\": \"010060320303\",\"description\": \"Spannungsminimum\",\"value\": " + String(Spannung_Min) + " ,\"unit\": \"VOLT\"},{\"obis\": \"010060320304\",\"description\": \"Spannungsmaximum\",\"value\": " + String(Spannung_Max) + " ,\"unit\": \"VOLT\"}],\"manufacturer\": \"" + String(manufacturer) + "\",\"smlPayload\": \"" + String(eHZ_Message) + "\"}";
 
-//AUSGABE
+#ifdef SERIALPRINT
                     Serial.println("-----------------------------------------------");
                     Serial.println("-----------------------------------------------");
                     Serial.println("-----------------------------------------------");
@@ -3245,37 +2398,51 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                     Serial.println("-----------------------------------------------");
                     Serial.println("SML Message:");
                     Serial.println(httpRequestData);
+#endif
+                    //PUT JSON-STRING
                     int httpResponseCode = http.PUT(httpRequestData);
+
+                    //count send attempts
                     sendAttempts++;
 
+                    //count successful sends and backlog
                     if(httpResponseCode == 200){
                         sendAttemptsSuccessful++;
                     } else if(httpResponseCode == 201){
                         sendAttemptsSuccessful++;
                     } else{
                         sendAttemptsFailed++;
+                        appendFile(SD, "/backlog.txt", httpRequestData.c_str());
+                        appendFile(SD, "/backlog.txt", ",");
                         backlog++;
                     }
 
-//AUSGABE
-                    Serial.print("HTTP Response code: ");
+                    
+                    if(httpResponseCode == 200 && sendAttemptsFailed > 0){
+                        appendFile(SD, "/backlogg.txt", "}");
+                        readFile(SD, "/backlog.txt");
+                        File file = SD.open("/backlog.txt");
+                        String sml_array = file.readString();
+                    }
+
+
+#ifdef SERIALPRINT
+                    Serial.println("HTTP Response code: ");
                     Serial.println(httpResponseCode);
+#endif
 
                     http.end();
                 }
 
-
-                //Metadaten an Server senden
-                if (timestamp != 0)
+                if (checkbox_meta && sendAttempts%1000 == 0)
                 {
+
+                    //Metadaten an Server senden
+                    if (timestamp != 0)
+                    {
                     HTTPClient http;
-                    // http.begin("https://zuse.icas.fh-dortmund.de:2443/ict-gw/metadata");
-                    // http.addHeader("x-api-key","lz7L445xjHLvBUvr5zmwJf4tmRTeIQCX");
-                    // http.addHeader("Authorization","Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJrTEsxVDYyTXJId1UwMXMxOWtYeVNzVkI4eFpzNkdnNCJ9.MKNoOz79a8oms-7mIb3kU2j6NdrjaDzh4lzqX6z9zCQ");
-                    // http.addHeader("x-host-override","sdc-service-api");
-                    // http.addHeader("Content-Type", "application/json");
                     
-                    http.begin(Serveraddress+Serveraddress_META);
+                    http.begin(Serveraddress_m+Serveraddress_META);
                     if (checkbox_apikey)
                     {
                         http.addHeader("x-api-key", Apikey);
@@ -3288,87 +2455,10 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                     http.addHeader("x-host-override", "sdc-service-api");
                     http.addHeader("Content-Type", "application/json");
 
-
                     upTime = (timestamp - initial_timestamp)*1000;
                     String metadataMessage = "{\"serverID\": \"" + String(ServerID_string_formatted) + "\",\"timestamp\":" + String(timestamp) + "000,\"identification\":" + String(ServerID_string) + ",\"manufacturer\": \"" + String(manufacturer) +"\", \"metadata\": [{\"id\": \"identification\",\"description\": \"Individualkennung des Geräts\", \"value\":" + String(device_ID) + " , \"unit\": \"Undefined\"},{\"id\": \"upTime\",\"description\": \"wie lange läuft das Gerät\", \"value\": " + String(upTime) + " ,\"unit\": \"MILLISECOND\"},{\"id\": \"inputSML\",\"description\": \"Anzahl empfangener SML-Protokolle\",\"value\": " + String(inputSML) + " ,\"unit\": \"COUNT\"},{\"id\": \"sendAttempts\",\"description\": \"Anzahl Versuche Datensätze zu übertragen\",\"value\": " + String(sendAttempts) + " ,\"unit\": \"COUNT\"},{\"id\": \"sendAttemptsSuccessful\",\"description\": \"Anzahl erfolgreicher Übertragungsversuche\",\"value\": " + String(sendAttemptsSuccessful) + " ,\"unit\": \"COUNT\"},{\"id\": \"sendAttemptsFailed\",\"description\": \"Anzahl gescheiterter Übertragungsversuche\",\"value\": " + String(sendAttemptsFailed) + " ,\"unit\": \"COUNT\"},{\"id\": \"backlog\",\"description\": \"Anzahl noch zu übertragender Datensätze\",\"value\": " + String(backlog) + " ,\"unit\": \"COUNT\"},{\"id\": \"firmwareVersion\",\"description\": \"Aktuell installierte Firmware\",\"value\":" + String(firmwareVersion) + " ,\"unit\": \"Undefined\"},{\"id\": \"freeSpaceSD\",\"description\": \"Speicherplatz auf der SD-Karte\",\"value\": " + String(freeSpaceSD) + " ,\"unit\": \"COUNT\"},{\"id\": \"ramMaxLoad\",\"description\": \"maximale Arbeitsspeicherauslastung\",\"value\": " + String(ramMaxLoad) + " ,\"unit\": \"COUNT\"},{\"id\": \"signalStrengthWifi\",\"description\": \"aktuelle Signalstärke des WiFi-Netzes\",\"value\": " + String(signalStrengthWifi) + " ,\"unit\": \"PERCENTAGE\"}]}";
 
-                    // String metadataMessage = 
-                    // "{
-                    //     \"serverID\": \"" + String(ServerID_string_formatted) + "\",
-                    //     \"timestamp\":" + String(timestamp) + "000,
-                    //     \"identification\":" + String(ServerID_string) + "\",
-                    //     \"manufacturer\":" + String(manufacturer) +"\",
-                    //     \"metadata\": [
-                    //         {
-                    //             \"id\": \"identification\",
-                    //             \"description\": \"Individualkennung des Geräts\",
-                    //             \"value\":" + String(device_ID) + " ,
-                    //             \"unit\": \"Undefined\"
-                    //         },
-                    //         {
-                    //             \"id\": \"upTime\",
-                    //             \"description\": \"wie lange läuft das Gerät\",
-                    //             \"value\": " + String(upTime) + " ,
-                    //             \"unit\": \"MILLISECOND\"
-                    //         },
-                    //         {
-                    //             \"id\": \"inputSML\",
-                    //             \"description\": \"Anzahl empfangener SML-Protokolle\",
-                    //             \"value\": " + String(inputSML) + " ,
-                    //             \"unit\": \"COUNT\"
-                    //         },
-                    //         {
-                    //             \"id\": \"sendAttempts\",
-                    //             \"description\": \"Anzahl Versuche Datensätze zu übertragen\",
-                    //             \"value\": " + String(sendAttempts) + " ,
-                    //             \"unit\": \"COUNT\"
-                    //         },
-                    //         {
-                    //             \"id\": \"sendAttemptsSuccessful\",
-                    //             \"description\": \"Anzahl erfolgreicher Übertragungsversuche\",
-                    //             \"value\": " + String(sendAttemptsSuccessful) + " ,
-                    //             \"unit\": \"COUNT\"
-                    //         },
-                    //         {
-                    //             \"id\": \"sendAttemptsFailed\",
-                    //             \"description\": \"Anzahl gescheiterter Übertragungsversuche\",
-                    //             \"value\": " + String(sendAttemptsFailed) + " ,
-                    //             \"unit\": \"COUNT\"
-                    //         },
-                    //         {
-                    //             \"id\": \"backlog\",
-                    //             \"description\": \"Anzahl noch zu übertragender Datensätze\",
-                    //             \"value\": " + String(backlog) + " ,
-                    //             \"unit\": \"COUNT\"
-                    //         },
-                    //         {
-                    //             \"id\": \"firmwareVersion\",
-                    //             \"description\": \"Aktuell installierte Firmware\",
-                    //             \"value\":" + String(firmwareVersion) + " ,
-                    //             \"unit\": \"Undefined\"
-                    //         },
-                    //         {
-                    //             \"id\": \"freeSpaceSD\",
-                    //             \"description\": \"Speicherplatz auf der SD-Karte\",
-                    //             \"value\": " + String(freeSpaceSD) + " ,
-                    //             \"unit\": \"COUNT\"
-                    //         },
-                    //         {
-                    //             \"id\": \"ramMaxLoad\",
-                    //             \"description\": \"maximale Arbeitsspeicherauslastung\",
-                    //             \"value\": " + String(ramMaxLoad) + " ,
-                    //             \"unit\": \"COUNT\"
-                    //         },
-                    //         {
-                    //             \"id\": \"signalStrengthWifi\",
-                    //             \"description\": \"aktuelle Signalstärke des WiFi-Netzes\",
-                    //             \"value\": " + String(signalStrengthWifi) + " ,
-                    //             \"unit\": \"PERCENTAGE\"
-                    //         }
-                    //     ],
-                    // }";
-
-//AUSGABE
+#ifdef SERIALPRINT
                     Serial.println("-----------------------------------------------");
                     Serial.println("-----------------------------------------------");
                     Serial.println("-----------------------------------------------");
@@ -3376,13 +2466,17 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                     Serial.println("-----------------------------------------------");
                     Serial.println("METADATA Message:");
                     Serial.println(metadataMessage);
+#endif
+                    //PUT metadata message
                     int httpResponseCodeMeta = http.PUT(metadataMessage);
 
-//AUSGABE
-                    Serial.print("HTTP Response code: ");
+#ifdef SERIALPRINT
+                    Serial.println("HTTP Response code: ");
                     Serial.println(httpResponseCodeMeta);
+#endif
 
                     http.end();
+                    }
                 }
 
                 //reset activation
@@ -3419,18 +2513,14 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
                 Age_Chiptemp_Min++;
                 Age_Chiptemp_Max++;
                 Age_Chiptemp_Avg++;
-
-                if ((Werte_Empfangen == 0) && ((DEBUG) < 0x8000))
-                {                                // keine Werte erkannt, dann wenigstens die Rohdaten ausgeben
-                    Serial.println(eHZ_Message); // eHZ-Message ausgeben
-                    Serial.println("");          // Trennzeile
-                }
             }
             strcpy(eHZ_Message, ""); // Eingelesene Daten nun loeschen, auf neue warten
 
             if(WiFi.status() != WL_CONNECTED){
                 connection_counter++;
+#ifdef SERIALPRINT
                 Serial.println(connection_counter);
+#endif
                 if(connection_counter>1000000){
                     ESP.restart();
                 }
@@ -3446,7 +2536,9 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
 
             if(WiFi.status() != WL_CONNECTED){
                 connection_counter++;
+#ifdef SERIALPRINT
                 Serial.println(connection_counter);
+#endif
                 if(connection_counter>1000000){
                     ESP.restart();
                 }
@@ -3458,7 +2550,9 @@ appendFile(SD, "/test.txt", "1. Zeile der Testdatei");
 
     if(WiFi.status() != WL_CONNECTED){
         connection_counter++;
+#ifdef SERIALPRINT
         Serial.println(connection_counter);
+#endif
         if(connection_counter>1000000){
             ESP.restart();
         }
